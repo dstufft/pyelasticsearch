@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
+import urlparse
+
 from datetime import datetime
 from functools import wraps
 from logging import getLogger
@@ -97,14 +99,28 @@ class ElasticSearch(object):
         """
         if isinstance(urls, basestring):
             urls = [urls]
-        urls = [u.rstrip('/') for u in urls]
-        self.servers = DowntimePronePool(urls, revival_delay)
+
+        parsed_urls = []
+
+        self.sessions = {}
+        self.session = requests.session()
+
+        for url in urls:
+            parsed = urlparse.urlparse(url)
+            netloc = ":".join(filter(None, [parsed.hostname, str(parsed.port) if parsed.port else None]))
+            url = urlparse.urlunparse(parsed[:1] + (netloc,) + parsed[2:]).rstrip("/")
+
+            if parsed.username or parsed.password:
+                self.sessions[url] = requests.session(auth=(parsed.username, parsed.password))
+
+            parsed_urls.append(url)
+
+        self.servers = DowntimePronePool(parsed_urls, revival_delay)
         self.revival_delay = revival_delay
 
         self.timeout = timeout
         self.max_retries = max_retries
         self.logger = getLogger('pyelasticsearch')
-        self.session = requests.session()
 
         json_converter = self.from_python
 
@@ -180,13 +196,16 @@ class ElasticSearch(object):
 
         kwargs = ({'data': self._encode_json(body) if encode_body else body}
                    if body else {})
-        req_method = getattr(self.session, method.lower())
 
         # We do our own retrying rather than using urllib3's; we want to retry
         # a different node in the cluster if possible, not the same one again
         # (which may be down).
         for attempt in xrange(self.max_retries + 1):
             server_url, was_dead = self.servers.get()
+
+            session = self.sessions.get(server_url, self.session)
+            req_method = getattr(session, method.lower())
+
             url = server_url + path
             self.logger.debug(
                 'making %s request to path: %s %s with body: %s',
